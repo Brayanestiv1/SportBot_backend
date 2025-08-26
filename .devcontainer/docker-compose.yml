@@ -1,9 +1,10 @@
 version: '3.8'
 
 services:
-  # Aplicación FastAPI
   app:
-    build: .
+    build: 
+      context: ..
+      dockerfile: ./.devcontainer/Dockerfile
     container_name: sportbot-api
     ports:
       - "8000:8000"
@@ -13,8 +14,9 @@ services:
       - QDRANT_PORT=6333
       - QDRANT_COLLECTION=sportbot_collection
     volumes:
-      - ./app:/app/app
-      - ./uploads:/app/uploads
+      # Sincroniza la carpeta raíz del proyecto con el directorio de trabajo del contenedor
+      - ../..:/workspaces:cached
+    command: sleep infinity
     depends_on:
       - db
       - qdrant
@@ -22,7 +24,6 @@ services:
       - sportbot-network
     restart: unless-stopped
 
-  # Base de datos MySQL
   db:
     image: mysql:8.0
     container_name: sportbot-mysql
@@ -41,7 +42,6 @@ services:
     restart: unless-stopped
     command: --default-authentication-plugin=mysql_native_password
 
-  # Vector database Qdrant
   qdrant:
     image: qdrant/qdrant:latest
     container_name: sportbot-qdrant
@@ -54,7 +54,6 @@ services:
       - sportbot-network
     restart: unless-stopped
 
-  # Redis para caché (opcional)
   redis:
     image: redis:7-alpine
     container_name: sportbot-redis
