@@ -60,12 +60,14 @@ async def startup_event():
         qdrant_service.create_collection_if_not_exists()
         logger.info("Qdrant collection initialized successfully")
         
-        # Optional: Perform initial data synchronization
-        # Uncomment the following lines if you want automatic sync on startup
-        # logger.info("Starting initial data synchronization...")
-        # data_sync = DataSyncService()
-        # sync_result = await data_sync.sync_all_data()
-        # logger.info(f"Initial sync completed: {sync_result['synced_count']} documents")
+        logger.info("Starting initial data synchronization...")
+        data_sync = DataSyncService()
+        sync_result = await data_sync.sync_all_data()
+        
+        if sync_result['status'] == 'success':
+            logger.info(f"✅ Initial sync completed: {sync_result['synced_count']} documents")
+        else:
+            logger.error(f"❌ Sync failed: {sync_result['message']}")
         
         logger.info("RAG initialization completed successfully")
         
@@ -199,6 +201,36 @@ async def delete_webhook():
             raise HTTPException(status_code=400, detail=f"❌ Error de Telegram: {result}")
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"❌ Error: {str(e)}")
+
+@app.post("/api/v1/sync-data")
+async def manual_sync():
+    """Endpoint para sincronización manual de datos"""
+    try:
+        logger.info("Manual data synchronization requested")
+        data_sync = DataSyncService()
+        sync_result = await data_sync.sync_all_data()
+        return sync_result
+    except Exception as e:
+        logger.error(f"Error in manual sync: {str(e)}")
+        return {
+            "status": "error",
+            "message": f"Error en sincronización manual: {str(e)}",
+            "synced_count": 0
+        }
+
+@app.get("/api/v1/sync-status")
+async def get_sync_status():
+    """Obtener estado actual de la sincronización"""
+    try:
+        data_sync = DataSyncService()
+        status = await data_sync.get_sync_status()
+        return status
+    except Exception as e:
+        return {
+            "status": "error",
+            "message": f"Error obteniendo estado: {str(e)}",
+            "data": None
+        }
 
 from fastapi.responses import JSONResponse
 

@@ -2,11 +2,12 @@
 
 import os
 import logging
+import uuid
 from typing import List, Dict, Any, Optional
 
-import anyio
 from qdrant_client import QdrantClient
-from qdrant_client.models import Filter, FieldCondition, MatchValue, SearchRequest, PointStruct, VectorParams, Distance, PointStruct
+from qdrant_client import models
+from qdrant_client.models import Filter, FieldCondition, MatchValue, SearchRequest, PointStruct, VectorParams, Distance
 from app.config import *
 
 logger = logging.getLogger(__name__)
@@ -76,6 +77,40 @@ class QdrantService:
             logger.error(f"Error initializing collection: {str(e)}")
             raise
     
+    async def upsert_document(self, doc_id: str, content: str, embedding: List[float], 
+                            metadata: Dict[str, Any]) -> bool:
+        """Insert or update a single document in Qdrant"""
+        try:
+            point = PointStruct(
+                id=doc_id,
+                vector=embedding,
+                payload={
+                    'content': content,
+                    'metadata': metadata,
+                    'tipo': metadata.get('type', 'producto'),
+                    'categoria_id': metadata.get('categoria_id'),
+                    'precio': metadata.get('precio'),
+                    'disponible': metadata.get('disponible', True),
+                    'nombre': metadata.get('nombre', ''),
+                    'categoria': metadata.get('categoria', ''),
+                    'descripcion': metadata.get('descripcion', ''),
+                    'descuento': metadata.get('descuento', 0.0),
+                    'activa': metadata.get('activa', True)
+                }
+            )
+            
+            self.client.upsert(
+                collection_name=self.collection_name,
+                points=[point]
+            )
+            
+            logger.debug(f"Upserted document {doc_id} to Qdrant")
+            return True
+            
+        except Exception as e:
+            logger.error(f"Error upserting document {doc_id}: {str(e)}")
+            return False
+    
     def upsert_documents(self, documents: List[Dict[str, Any]]) -> bool:
         """Insert or update documents in Qdrant"""
         try:
@@ -111,6 +146,15 @@ class QdrantService:
                       filters: Optional[Dict[str, Any]] = None) -> List[Dict[str, Any]]:
         """Search for similar documents"""
         try:
+            try:
+                collection_info = self.client.get_collection(self.collection_name)
+                if collection_info.points_count == 0:
+                    logger.warning(f"Collection {self.collection_name} exists but is empty")
+                    return []
+            except Exception as e:
+                logger.error(f"Collection {self.collection_name} not found or inaccessible: {str(e)}")
+                return []
+            
             search_filter = None
             if filters:
                 conditions = []
@@ -147,6 +191,7 @@ class QdrantService:
                     'id': result.id,
                     'score': result.score,
                     'content': result.payload.get('content', ''),
+                    'payload': result.payload,  # Incluir payload completo
                     'metadata': result.payload.get('metadata', {}),
                     'tipo': result.payload.get('tipo', 'producto'),
                     'categoria_id': result.payload.get('categoria_id'),
@@ -155,12 +200,13 @@ class QdrantService:
                 }
                 documents.append(doc)
             
+            logger.debug(f"Found {len(documents)} similar documents with scores: {[d['score'] for d in documents]}")
             return documents
             
         except Exception as e:
             logger.error(f"Error searching documents: {str(e)}")
             return []
-    
+
     def delete_documents(self, document_ids: List[str]) -> bool:
         """Delete documents by IDs"""
         try:
@@ -184,7 +230,7 @@ class QdrantService:
             info = self.client.get_collection(self.collection_name)
             return {
                 'name': self.collection_name,
-                'vectors_count': info.config.params.vectors.size,
+                'vectors_count': info.vectors_count if hasattr(info, 'vectors_count') else 0,
                 'points_count': info.points_count,
                 'status': info.status
             }
@@ -199,8 +245,8 @@ class QdrantService:
                 collection_name=self.collection_name,
                 points_selector=models.FilterSelector(
                     filter=models.Filter(
-                        must=[
-                            models.HasIdCondition(has_id=[])
+                        must_not=[
+                            models.HasIdCondition(has_id=["non_existent_id"])
                         ]
                     )
                 )

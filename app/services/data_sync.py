@@ -93,9 +93,15 @@ class DataSyncService:
         try:
             with connection.cursor() as cursor:
                 sql = """
-                SELECT p.*, c.nombre as categoria_nombre 
+                SELECT p.*, c.nombre as categoria_nombre,
+                       GROUP_CONCAT(DISTINCT CONCAT(pr.descripcion, ':', pr.descuentoPorcentaje, '%') SEPARATOR ' | ') as promociones_activas
                 FROM producto p 
                 LEFT JOIN categoria c ON p.categoriaId = c.id
+                LEFT JOIN promocionProducto pp ON p.id = pp.productoId
+                LEFT JOIN promocion pr ON pp.promocionId = pr.id 
+                    AND pr.fechaInicio <= CURDATE() 
+                    AND pr.fechaFin >= CURDATE()
+                GROUP BY p.id, p.nombre, p.descripcion, p.precio, p.stock, p.talla, p.color, p.categoriaId, c.nombre
                 """
                 cursor.execute(sql)
                 productos = cursor.fetchall()
@@ -108,9 +114,11 @@ class DataSyncService:
                     # Generate embedding
                     embedding = await self.embedding_service.generate_embedding(content)
                     
+                    doc_id = int(producto['id'])
+                    
                     # Store in Qdrant
                     await self.qdrant_service.upsert_document(
-                        doc_id=f"producto_{producto['id']}",
+                        doc_id=doc_id,
                         content=content,
                         embedding=embedding,
                         metadata={
@@ -118,8 +126,14 @@ class DataSyncService:
                             "id": producto['id'],
                             "nombre": producto['nombre'],
                             "categoria": producto.get('categoria_nombre', ''),
+                            "categoria_id": producto['categoriaId'],
                             "precio": float(producto['precio']) if producto['precio'] else 0.0,
-                            "disponible": bool(producto['disponible'])
+                            "disponible": producto['stock'] > 0,  # Based on stock availability
+                            "descripcion": producto.get('descripcion', ''),
+                            "talla": producto.get('talla', ''),
+                            "color": producto.get('color', ''),
+                            "stock": producto['stock'],
+                            "promociones_activas": producto.get('promociones_activas', '') or ''
                         }
                     )
                     synced_count += 1
@@ -143,8 +157,10 @@ class DataSyncService:
                     content = self._create_categoria_content(categoria)
                     embedding = await self.embedding_service.generate_embedding(content)
                     
+                    doc_id = int(categoria['id']) + 1000000
+                    
                     await self.qdrant_service.upsert_document(
-                        doc_id=f"categoria_{categoria['id']}",
+                        doc_id=doc_id,
                         content=content,
                         embedding=embedding,
                         metadata={
@@ -162,14 +178,19 @@ class DataSyncService:
             connection.close()
     
     async def _sync_promociones(self) -> int:
-        """Sync all promociones to Qdrant"""
+        """Sync all promociones to Qdrant with associated products"""
         connection = get_sync_connection()
         try:
             with connection.cursor() as cursor:
                 sql = """
-                SELECT p.*, pr.nombre as producto_nombre 
-                FROM promocion p 
-                LEFT JOIN producto pr ON p.productoId = pr.id
+                SELECT pr.*, 
+                       GROUP_CONCAT(DISTINCT p.nombre SEPARATOR ', ') as productos_nombres,
+                       GROUP_CONCAT(DISTINCT CONCAT(p.nombre, ' ($', p.precio, ')') SEPARATOR ', ') as productos_detalles,
+                       COUNT(DISTINCT p.id) as total_productos
+                FROM promocion pr
+                LEFT JOIN promocionProducto pp ON pr.id = pp.promocionId
+                LEFT JOIN producto p ON pp.productoId = p.id
+                GROUP BY pr.id
                 """
                 cursor.execute(sql)
                 promociones = cursor.fetchall()
@@ -179,17 +200,27 @@ class DataSyncService:
                     content = self._create_promocion_content(promocion)
                     embedding = await self.embedding_service.generate_embedding(content)
                     
+                    from datetime import date
+                    today = date.today()
+                    is_active = (promocion['fechaInicio'] <= today <= promocion['fechaFin'])
+                    
+                    doc_id = int(promocion['id']) + 2000000
+                    
                     await self.qdrant_service.upsert_document(
-                        doc_id=f"promocion_{promocion['id']}",
+                        doc_id=doc_id,
                         content=content,
                         embedding=embedding,
                         metadata={
                             "type": "promocion",
                             "id": promocion['id'],
-                            "titulo": promocion['titulo'],
-                            "descuento": float(promocion['descuento']) if promocion['descuento'] else 0.0,
-                            "producto": promocion.get('producto_nombre', ''),
-                            "activa": bool(promocion['activa'])
+                            "descripcion": promocion['descripcion'],
+                            "descuento": float(promocion['descuentoPorcentaje']) if promocion['descuentoPorcentaje'] else 0.0,
+                            "fecha_inicio": promocion['fechaInicio'].isoformat() if promocion['fechaInicio'] else None,
+                            "fecha_fin": promocion['fechaFin'].isoformat() if promocion['fechaFin'] else None,
+                            "activa": is_active,
+                            "productos_nombres": promocion.get('productos_nombres', '') or '',
+                            "productos_detalles": promocion.get('productos_detalles', '') or '',
+                            "total_productos": promocion.get('total_productos', 0) or 0
                         }
                     )
                     synced_count += 1
@@ -198,51 +229,188 @@ class DataSyncService:
                 
         finally:
             connection.close()
-    
+
     def _create_producto_content(self, producto: Dict) -> str:
         """Create searchable content for producto"""
         parts = [
             f"Producto: {producto['nombre']}",
-            f"Descripción: {producto.get('descripcion', '')}",
-            f"Categoría: {producto.get('categoria_nombre', '')}",
+            f"Descripción: {producto.get('descripcion', '')}" if producto.get('descripcion') else "",
+            f"Categoría: {producto.get('categoria_nombre', '')}" if producto.get('categoria_nombre') else "",
             f"Precio: ${producto['precio']}" if producto['precio'] else "",
-            f"Disponible: {'Sí' if producto['disponible'] else 'No'}"
+            f"Talla: {producto.get('talla', '')}" if producto.get('talla') else "",
+            f"Color: {producto.get('color', '')}" if producto.get('color') else "",
+            f"Stock: {producto['stock']} unidades" if producto['stock'] else "",
+            f"Disponible: {'Sí' if producto['stock'] > 0 else 'No'}"
         ]
+        
+        if producto.get('promociones_activas'):
+            parts.append(f"Promociones activas: {producto['promociones_activas']}")
+        
         return " | ".join([p for p in parts if p])
-    
+
     def _create_categoria_content(self, categoria: Dict) -> str:
         """Create searchable content for categoria"""
         parts = [
             f"Categoría: {categoria['nombre']}",
-            f"Descripción: {categoria.get('descripcion', '')}"
+            f"Descripción: {categoria.get('descripcion', '')}" if categoria.get('descripcion') else ""
         ]
         return " | ".join([p for p in parts if p])
     
     def _create_promocion_content(self, promocion: Dict) -> str:
         """Create searchable content for promocion"""
         parts = [
-            f"Promoción: {promocion['titulo']}",
-            f"Descripción: {promocion.get('descripcion', '')}",
-            f"Descuento: {promocion['descuento']}%" if promocion['descuento'] else "",
-            f"Producto: {promocion.get('producto_nombre', '')}",
-            f"Estado: {'Activa' if promocion['activa'] else 'Inactiva'}"
+            f"Promoción: {promocion['descripcion']}",
+            f"Descuento: {promocion['descuentoPorcentaje']}%" if promocion['descuentoPorcentaje'] else "",
+            f"Válida desde: {promocion['fechaInicio']}" if promocion['fechaInicio'] else "",
+            f"Válida hasta: {promocion['fechaFin']}" if promocion['fechaFin'] else ""
         ]
+        
+        if promocion.get('productos_nombres'):
+            parts.append(f"Productos en promoción: {promocion['productos_nombres']}")
+        if promocion.get('productos_detalles'):
+            parts.append(f"Detalles de productos: {promocion['productos_detalles']}")
+        if promocion.get('total_productos', 0) > 0:
+            parts.append(f"Total de productos: {promocion['total_productos']}")
+        
         return " | ".join([p for p in parts if p])
     
     async def _sync_productos_incremental(self, since: datetime) -> int:
         """Sync productos modified since timestamp"""
-        # Implementation for incremental sync
-        # This would require modification timestamps in the database
-        return await self._sync_productos()  # Fallback to full sync for now
+        connection = get_sync_connection()
+        try:
+            with connection.cursor() as cursor:
+                sql = """
+                SELECT p.*, c.nombre as categoria_nombre,
+                       GROUP_CONCAT(DISTINCT CONCAT(pr.descripcion, ':', pr.descuentoPorcentaje, '%') SEPARATOR ' | ') as promociones_activas
+                FROM producto p 
+                LEFT JOIN categoria c ON p.categoriaId = c.id
+                LEFT JOIN promocionProducto pp ON p.id = pp.productoId
+                LEFT JOIN promocion pr ON pp.promocionId = pr.id 
+                    AND pr.fechaInicio <= CURDATE() 
+                    AND pr.fechaFin >= CURDATE()
+                WHERE p.fechaActualizacion >= %s
+                GROUP BY p.id, p.nombre, p.descripcion, p.precio, p.stock, p.talla, p.color, p.categoriaId, c.nombre
+                """
+                cursor.execute(sql, (since,))
+                productos = cursor.fetchall()
+                
+                synced_count = 0
+                for producto in productos:
+                    content = self._create_producto_content(producto)
+                    embedding = await self.embedding_service.generate_embedding(content)
+                    
+                    doc_id = int(producto['id'])
+                    
+                    await self.qdrant_service.upsert_document(
+                        doc_id=doc_id,
+                        content=content,
+                        embedding=embedding,
+                        metadata={
+                            "type": "producto",
+                            "id": producto['id'],
+                            "nombre": producto['nombre'],
+                            "categoria": producto.get('categoria_nombre', ''),
+                            "categoria_id": producto['categoriaId'],
+                            "precio": float(producto['precio']) if producto['precio'] else 0.0,
+                            "disponible": producto['stock'] > 0,
+                            "descripcion": producto.get('descripcion', ''),
+                            "stock": producto['stock'],
+                            "promociones_activas": producto.get('promociones_activas', '') or ''
+                        }
+                    )
+                    synced_count += 1
+                
+                return synced_count
+        finally:
+            connection.close()
     
     async def _sync_categorias_incremental(self, since: datetime) -> int:
         """Sync categorias modified since timestamp"""
-        return await self._sync_categorias()  # Fallback to full sync for now
-    
+        connection = get_sync_connection()
+        try:
+            with connection.cursor() as cursor:
+                sql = "SELECT * FROM categoria WHERE fechaActualizacion >= %s"
+                cursor.execute(sql, (since,))
+                categorias = cursor.fetchall()
+                
+                synced_count = 0
+                for categoria in categorias:
+                    content = self._create_categoria_content(categoria)
+                    embedding = await self.embedding_service.generate_embedding(content)
+                    
+                    doc_id = int(categoria['id']) + 1000000
+                    
+                    await self.qdrant_service.upsert_document(
+                        doc_id=doc_id,
+                        content=content,
+                        embedding=embedding,
+                        metadata={
+                            "type": "categoria",
+                            "id": categoria['id'],
+                            "nombre": categoria['nombre'],
+                            "descripcion": categoria.get('descripcion', '')
+                        }
+                    )
+                    synced_count += 1
+                
+                return synced_count
+        finally:
+            connection.close()
+
     async def _sync_promociones_incremental(self, since: datetime) -> int:
         """Sync promociones modified since timestamp"""
-        return await self._sync_promociones()  # Fallback to full sync for now
-    
+        connection = get_sync_connection()
+        try:
+            with connection.cursor() as cursor:
+                sql = """
+                SELECT pr.*, 
+                       GROUP_CONCAT(DISTINCT p.nombre SEPARATOR ', ') as productos_nombres,
+                       GROUP_CONCAT(DISTINCT CONCAT(p.nombre, ' ($', p.precio, ')') SEPARATOR ', ') as productos_detalles,
+                       COUNT(DISTINCT p.id) as total_productos
+                FROM promocion pr
+                LEFT JOIN promocionProducto pp ON pr.id = pp.promocionId
+                LEFT JOIN producto p ON pp.productoId = p.id
+                WHERE pr.fechaInicio <= CURDATE() 
+                    AND pr.fechaFin >= CURDATE()
+                GROUP BY pr.id
+                """
+                cursor.execute(sql, (since,))
+                promociones = cursor.fetchall()
+                
+                synced_count = 0
+                for promocion in promociones:
+                    content = self._create_promocion_content(promocion)
+                    embedding = await self.embedding_service.generate_embedding(content)
+                    
+                    from datetime import date
+                    today = date.today()
+                    is_active = (promocion['fechaInicio'] <= today <= promocion['fechaFin'])
+                    
+                    doc_id = int(promocion['id']) + 2000000
+                    
+                    await self.qdrant_service.upsert_document(
+                        doc_id=doc_id,
+                        content=content,
+                        embedding=embedding,
+                        metadata={
+                            "type": "promocion",
+                            "id": promocion['id'],
+                            "descripcion": promocion['descripcion'],
+                            "descuento": float(promocion['descuentoPorcentaje']) if promocion['descuentoPorcentaje'] else 0.0,
+                            "fecha_inicio": promocion['fechaInicio'].isoformat() if promocion['fechaInicio'] else None,
+                            "fecha_fin": promocion['fechaFin'].isoformat() if promocion['fechaFin'] else None,
+                            "activa": is_active,
+                            "productos_nombres": promocion.get('productos_nombres', '') or '',
+                            "productos_detalles": promocion.get('productos_detalles', '') or '',
+                            "total_productos": promocion.get('total_productos', 0) or 0
+                        }
+                    )
+                    synced_count += 1
+                
+                return synced_count
+        finally:
+            connection.close()
+
     async def get_sync_status(self) -> Dict:
         """Get current synchronization status"""
         try:
@@ -252,8 +420,9 @@ class DataSyncService:
                 "status": "success",
                 "message": "Estado de sincronización obtenido",
                 "data": {
-                    "collection_exists": collection_info is not None,
-                    "total_documents": collection_info.get("vectors_count", 0) if collection_info else 0,
+                    "collection_exists": bool(collection_info),
+                    "total_documents": collection_info.get("points_count", 0) if collection_info else 0,
+                    "collection_name": collection_info.get("name", "") if collection_info else "",
                     "last_check": datetime.now().isoformat()
                 }
             }
