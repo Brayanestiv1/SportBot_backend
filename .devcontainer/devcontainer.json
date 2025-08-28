@@ -1,5 +1,3 @@
-// For format details, see https://aka.ms/devcontainer.json. For config options, see the
-// README at: https://github.com/devcontainers/templates/tree/main/src/python
 {
   "name": "SportBot Dev Environment",
   "dockerComposeFile": "docker-compose.yml",
@@ -30,12 +28,14 @@
         "donjayamanne.githistory",
         "eamodio.gitlens",
         "cweijan.vscode-mysql-client2",
-        "cweijan.dbclient-jdbc"
+        "cweijan.dbclient-jdbc",
+        "codeviz.codeviz"
       ]
     }
   },
   "forwardPorts": [
     8000,
+    3000,
     3307,
     6333,
     6379
@@ -43,5 +43,6 @@
   "features": {
     "ghcr.io/devcontainers/features/github-cli:1": {}
   },
-  "postStartCommand": "uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload"
+  "postStartCommand": "uvicorn SportBot_backend.app.main:app --host 0.0.0.0 --port 8000 --reload",
+  "postAttachCommand": "npm run dev --prefix ./SportBot_frontend"
 }

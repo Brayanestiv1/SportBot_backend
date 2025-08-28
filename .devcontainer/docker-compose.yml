@@ -2,8 +2,8 @@ version: '3.8'
 
 services:
   app:
-    build: 
-      context: ..
+    build:
+      context: ../
       dockerfile: ./.devcontainer/Dockerfile
     container_name: sportbot-api
     ports:
@@ -14,7 +14,9 @@ services:
       - QDRANT_PORT=6333
       - QDRANT_COLLECTION=sportbot_collection
     volumes:
-      # Sincroniza la carpeta raíz del proyecto con el directorio de trabajo del contenedor
+      # Monta la carpeta raíz del proyecto (SPORTBOT_BACKEND)
+      # en el directorio /workspaces dentro del contenedor.
+      # Esto coincide con el WORKDIR del Dockerfile.
       - ../..:/workspaces:cached
     command: sleep infinity
     depends_on:
@@ -36,7 +38,7 @@ services:
       - "3307:3306"
     volumes:
       - mysql_data:/var/lib/mysql
-      - ./mysql/init:/docker-entrypoint-initdb.d
+      - ./.devcontainer/mysql/init:/docker-entrypoint-initdb.d
     networks:
       - sportbot-network
     restart: unless-stopped
