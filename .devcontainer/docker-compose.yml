@@ -3,6 +3,8 @@ version: '3.8'
 services:
   app:
     build:
+      # El contexto de construcción debe ser el directorio padre de .devcontainer
+      # para que pueda acceder a SportBot_backend y SportBot_frontend
       context: ../
       dockerfile: ./.devcontainer/Dockerfile
     container_name: sportbot-api
@@ -16,7 +18,6 @@ services:
     volumes:
       # Monta la carpeta raíz del proyecto (SPORTBOT_BACKEND)
       # en el directorio /workspaces dentro del contenedor.
-      # Esto coincide con el WORKDIR del Dockerfile.
       - ../..:/workspaces:cached
     command: sleep infinity
     depends_on:
