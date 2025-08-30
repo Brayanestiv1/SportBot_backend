@@ -43,6 +43,6 @@
   "features": {
     "ghcr.io/devcontainers/features/github-cli:1": {}
   },
-  "postStartCommand": "uvicorn SportBot_backend.app.main:app --host 0.0.0.0 --port 8000 --reload",
-  "postAttachCommand": "npm run dev --prefix ./SportBot_frontend"
+  "postCreateCommand": "chmod +x ./.devcontainer/start-dev.sh",
+  "postStartCommand": "./.devcontainer/start-dev.sh"
 }
